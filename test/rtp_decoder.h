@@ -49,6 +49,7 @@
 
 #include "srtp_priv.h"
 #include "rtp.h"
+#include "payload_utils.h"
 
 #define MAX_FILENAME 256
 #define DEFAULT_RTP_OFFSET 42
@@ -76,6 +77,12 @@ void rtp_print_error(srtp_err_status_t status, char *message);
  * prints the output of a random buffer in hexadecimal
  */
 void hexdump(const void *ptr, size_t size);
+
+int16_t WebRtcAmrWb_GetTableOfContentsSize(uint8_t* tocs);
+
+void WebRtcAmrWb_ExtractTableOfContents(payload_t* payload, uint8_t* tocs, uint8_t octet_align_enabled);
+
+int16_t WebRtcAmrWb_GetFrameBitSize(uint8_t octet_align, uint8_t frame_type);
 
 /*
  * the function usage() prints an error message describing how this
@@ -105,5 +112,4 @@ srtp_err_status_t rtp_decoder_init_srtp(rtp_decoder_t decoder,
                                         unsigned int ssrc);
 
 int rtp_decoder_deinit_srtp(rtp_decoder_t decoder);
-
 #endif /* RTP_DECODER_H */

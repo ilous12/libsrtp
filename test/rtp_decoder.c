@@ -68,6 +68,7 @@
 #include <pcap.h>
 #include "rtp_decoder.h"
 #include "util.h"
+#include <stdio.h>
 
 #ifndef timersub
 #define timersub(a, b, result)                                                 \
@@ -532,6 +533,67 @@ void hexdump(const void *ptr, size_t size)
     }
 }
 
+int16_t WebRtcAmrWb_GetTableOfContentsSize(uint8_t* tocs) {
+  int ii;
+  int16_t toc_count = 0;
+  for (ii = 0; ii < 10; ii++) {
+    if(*tocs == 0) {
+      return toc_count;
+    }
+    toc_count++;
+    tocs++;
+  }
+  return toc_count;
+}
+
+void WebRtcAmrWb_ExtractTableOfContents(payload_t* payload, uint8_t* tocs, uint8_t octet_align_enabled) {
+  uint8_t next_frame_indicator = 1; //TOC가 더 존재하는지 유무 flag
+  uint8_t frame_type;
+  uint8_t frame_quality_indicator;
+  int16_t toc_count = 0;
+  while (next_frame_indicator) {
+    if (payload_eof(payload)) {
+      break;
+    }
+    
+    if (toc_count >= 10) {
+      break;
+    }
+    next_frame_indicator = payload_read_bit(payload, 1);
+    frame_type = payload_read_bit(payload, 4);
+    frame_quality_indicator = payload_read_bit(payload, 1);
+    if (octet_align_enabled) {
+      payload_read_bit(payload, 2); //octet_align모드일 경우 2bit를 추가적으로 읽어들임.
+    }
+    *tocs = ((next_frame_indicator << 7) | (frame_type << 3) | (frame_quality_indicator << 2)) & 0xFC;
+    tocs++;
+    toc_count++;
+  }
+}
+
+
+const int AMR_FRAME_BIT_SIZES[] = {132/*6.60hz*/, 177/*8.85hz*/, 253/*12.65hz*/,
+  285/*14.25hz*/, 317/*15.85hz*/, 365/*18.25hz*/,
+  397/*19.85hz*/, 461/*23.05hz*/, 477/*23.85*/,
+  40/*SID*/, 0/*for future use*/, 0/*for future use*/,
+  0/*for future use*/, 0/*for future use*/, 0/*speech lost*/,
+  0/*no data*/};
+
+
+int16_t WebRtcAmrWb_GetFrameBitSize(uint8_t octet_align, uint8_t frame_type) {
+  int frame_size = AMR_FRAME_BIT_SIZES[frame_type];
+  if (octet_align) {
+    int remainder = frame_size % 8;
+    if (remainder > 0 ) {
+      frame_size += (8 - remainder);
+    }
+  }
+  return frame_size;
+}
+
+
+const int AMR_SPEECH_FRAME_SIZES[] = {17, 23, 32, 36, 40, 46, 50, 58, 60, 5};
+
 void rtp_decoder_handle_pkt(u_char *arg,
                             const struct pcap_pkthdr *hdr,
                             const u_char *bytes)
@@ -589,10 +651,51 @@ void rtp_decoder_handle_pkt(u_char *arg,
             (long)delta.tv_usec);
     const unsigned char *cptr = (unsigned char *)&dcdr->message;
     hexdump(cptr, octets_recvd);
+  
     if (dcdr->amrFp) {
-        fwrite(cptr+12, 1, octets_recvd-12, dcdr->amrFp);
+      payload_t* payload = payload_create(cptr+12, octets_recvd-12, 0);
+
+      printf("start (octets_recvd-13) %d\n", octets_recvd-13);
+      uint8_t assemble_data[1000] = {0,};
+      payload_t* out_payload = payload_create(assemble_data, octets_recvd-13, 1);
+
+      payload_read_bit(payload, 4);
+      payload_read_bit(payload, 4);
+
+      uint8_t tocs[10] = {0,};
+
+      WebRtcAmrWb_ExtractTableOfContents(payload, tocs, 1);
+
+      uint8_t encoded[61] = {0,};
+
+      int16_t toc_count = WebRtcAmrWb_GetTableOfContentsSize(tocs);
+      int16_t ii = 0;
+/*
+ Example
+ ./rtp_decoder -o 44 -f udp -s AES_CM_128_HMAC_SHA1_80 -b wpsNWUUp4Hbpk5m+J0valvXP8KSBQURKeX8SZtXq < ./rtp.pcap -d test6.amr
+ */
+      for (ii = 0; ii < toc_count; ii++) {
+        int16_t encoded_len = 0;
+        int16_t frame_type = (uint8_t)((tocs[ii] >> 3) & 0x0F);
+        encoded[0] = tocs[ii];
+
+        payload_read_bytes(payload, &encoded[1], WebRtcAmrWb_GetFrameBitSize(1, frame_type));
+        encoded_len = 1 + AMR_SPEECH_FRAME_SIZES[frame_type]; //toc + speech frame size
+
+        printf("frame_type %d encoded_len %d\n", frame_type, encoded_len);
+//        hexdump(encoded, encoded_len);
+        uint8_t out_encoded[encoded_len];
+        
+        memcpy(out_encoded, encoded, encoded_len);
+        fwrite(out_encoded, 1, encoded_len, dcdr->amrFp);
+      }
+      
+      payload_destroy(payload);
+      payload_destroy(out_payload);
     }
 }
+
+
 
 void rtp_print_error(srtp_err_status_t status, char *message)
 {
