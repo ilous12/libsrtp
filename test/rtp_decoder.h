@@ -50,7 +50,9 @@
 #include "srtp_priv.h"
 #include "rtp.h"
 
+#define MAX_FILENAME 256
 #define DEFAULT_RTP_OFFSET 42
+static char const amrwb_magic[] = "#!AMR-WB\n";
 
 typedef struct rtp_decoder_ctx_t {
     srtp_policy_t policy;
@@ -59,6 +61,8 @@ typedef struct rtp_decoder_ctx_t {
     struct timeval start_tv;
     int frame_nr;
     rtp_msg_t message;
+    FILE *amrFp;
+    char amrFilename[MAX_FILENAME];
 } rtp_decoder_ctx_t;
 
 typedef struct rtp_decoder_ctx_t *rtp_decoder_t;
@@ -95,7 +99,7 @@ rtp_decoder_t rtp_decoder_alloc(void);
 
 void rtp_decoder_dealloc(rtp_decoder_t rtp_ctx);
 
-int rtp_decoder_init(rtp_decoder_t dcdr, srtp_policy_t policy);
+int rtp_decoder_init(rtp_decoder_t dcdr, srtp_policy_t policy, int rtp_offset);
 
 srtp_err_status_t rtp_decoder_init_srtp(rtp_decoder_t decoder,
                                         unsigned int ssrc);

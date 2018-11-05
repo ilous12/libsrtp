@@ -119,12 +119,14 @@ int main(int argc, char *argv[])
     char key[MAX_KEY_LEN];
     struct bpf_program fp;
     char filter_exp[MAX_FILTER] = "";
+    char amrFilename[MAX_FILENAME] = "";
     rtp_decoder_t dec;
     srtp_policy_t policy;
     srtp_err_status_t status;
     int len;
     int expected_len;
     int do_list_mods = 0;
+    int rtp_offset = DEFAULT_RTP_OFFSET;
 
     fprintf(stderr, "Using %s [0x%x]\n", srtp_get_version_string(),
             srtp_get_version());
@@ -140,11 +142,14 @@ int main(int argc, char *argv[])
 
     /* check args */
     while (1) {
-        c = getopt_s(argc, argv, "b:k:gt:ae:ld:f:s:");
+        c = getopt_s(argc, argv, "b:k:gt:ae:ld:f:s:o:");
         if (c == -1) {
             break;
         }
         switch (c) {
+	case 'o':
+	  rtp_offset = atoi(optarg_s);
+	  break;
         case 'b':
             b64_input = 1;
         /* fall thru */
@@ -173,13 +178,14 @@ int main(int argc, char *argv[])
             sec_servs |= sec_serv_auth;
             break;
         case 'd':
-            status = srtp_crypto_kernel_set_debug_module(optarg_s, 1);
-            if (status) {
-                fprintf(stderr, "error: set debug module (%s) failed\n",
-                        optarg_s);
-                exit(1);
-            }
-            break;
+	  if (strlen(optarg_s) > MAX_FILENAME) {
+	    fprintf(stderr, "error: amr filename bigger than %d characters\n",
+		    MAX_FILENAME);
+	    exit(1);
+	  }
+	  fprintf(stderr, "Setting amr filename as %s\n", optarg_s);
+	  strcpy(amrFilename, optarg_s);
+	  break;
         case 'f':
             if (strlen(optarg_s) > MAX_FILTER) {
                 fprintf(stderr, "error: filter bigger than %d characters\n",
@@ -421,9 +427,14 @@ int main(int argc, char *argv[])
         exit(1);
     }
     fprintf(stderr, "Starting decoder\n");
-    rtp_decoder_init(dec, policy);
+    rtp_decoder_init(dec, policy, rtp_offset);
+    strcpy(dec->amrFilename, amrFilename);
 
     pcap_loop(pcap_handle, 0, rtp_decoder_handle_pkt, (u_char *)dec);
+
+    if (dec->amrFp) {
+      fclose(dec->amrFp);
+    }
 
     rtp_decoder_deinit_srtp(dec);
     rtp_decoder_dealloc(dec);
@@ -434,7 +445,6 @@ int main(int argc, char *argv[])
                 status);
         exit(1);
     }
-
     return 0;
 }
 
@@ -442,17 +452,27 @@ void usage(char *string)
 {
     fprintf(
         stderr,
+	/*
         "usage: %s [-d <debug>]* [[-k][-b] <key> [-a][-e]]\n"
+	*/
+        "usage: %s [-d <debug>] [[-b] <key> [-a]]\n"
         "or     %s -l\n"
+	/*
         "where  -a use message authentication\n"
         "       -e <key size> use encryption (use 128 or 256 for key size)\n"
+	*/
+        "       -o <rtp offset> rtp_offset (use 42 or 44 for pcap rtp offset)\n"
+	/*
         "       -g Use AES-GCM mode (must be used with -e)\n"
         "       -t <tag size> Tag size to use (in GCM mode use 8 or 16)\n"
         "       -k <key>  sets the srtp master key given in hexadecimal\n"
+	*/
         "       -b <key>  sets the srtp master key given in base64\n"
+	/*
         "       -l list debug modules\n"
+	*/
         "       -f \"<pcap filter>\" to filter only the desired SRTP packets\n"
-        "       -d <debug> turn on debugging for module <debug>\n"
+        "       -d <amr filename> amr file write\n"
         "       -s \"<srtp-crypto-suite>\" to set both key and tag size based\n"
         "          on RFC4568-style crypto suite specification\n",
         string, string);
@@ -461,7 +481,7 @@ void usage(char *string)
 
 rtp_decoder_t rtp_decoder_alloc(void)
 {
-    return (rtp_decoder_t)malloc(sizeof(rtp_decoder_ctx_t));
+  return (rtp_decoder_t)malloc(sizeof(rtp_decoder_ctx_t));
 }
 
 void rtp_decoder_dealloc(rtp_decoder_t rtp_ctx)
@@ -481,15 +501,16 @@ int rtp_decoder_deinit_srtp(rtp_decoder_t decoder)
     return srtp_dealloc(decoder->srtp_ctx);
 }
 
-int rtp_decoder_init(rtp_decoder_t dcdr, srtp_policy_t policy)
+int rtp_decoder_init(rtp_decoder_t dcdr, srtp_policy_t policy, int rtp_offset)
 {
-    dcdr->rtp_offset = DEFAULT_RTP_OFFSET;
+    dcdr->rtp_offset = rtp_offset;
     dcdr->srtp_ctx = NULL;
     dcdr->start_tv.tv_usec = 0;
     dcdr->start_tv.tv_sec = 0;
     dcdr->frame_nr = -1;
     dcdr->policy = policy;
     dcdr->policy.ssrc.type = ssrc_specific;
+    dcdr->amrFp = NULL;
     return 0;
 }
 
@@ -544,19 +565,33 @@ void rtp_decoder_handle_pkt(u_char *arg,
         return;
     }
     if (dcdr->srtp_ctx == NULL) {
-        status = rtp_decoder_init_srtp(dcdr, dcdr->message.header.ssrc);
+      fprintf(stderr, "ssrc=0x%x\n", dcdr->message.header.ssrc);
+      status = rtp_decoder_init_srtp(dcdr, dcdr->message.header.ssrc);
         if (status) {
+	  rtp_print_error(status, "srtp_unprotect");
             exit(1);
         }
     }
     status = srtp_unprotect(dcdr->srtp_ctx, &dcdr->message, &octets_recvd);
     if (status) {
+      rtp_print_error(status, "srtp_unprotect");
         return;
     }
+    if (!dcdr->amrFp) {
+      if (strlen(dcdr->amrFilename) > 0) {
+	dcdr->amrFp = fopen(dcdr->amrFilename, "wb");
+	fwrite(amrwb_magic, sizeof(char), strlen(amrwb_magic), dcdr->amrFp);
+      }
+    }
+
     timersub(&hdr->ts, &dcdr->start_tv, &delta);
     fprintf(stdout, "%02ld:%02ld.%06ld\n", delta.tv_sec / 60, delta.tv_sec % 60,
             (long)delta.tv_usec);
-    hexdump(&dcdr->message, octets_recvd);
+    const unsigned char *cptr = (unsigned char *)&dcdr->message;
+    hexdump(cptr, octets_recvd);
+    if (dcdr->amrFp) {
+        fwrite(cptr+12, 1, octets_recvd-12, dcdr->amrFp);
+    }
 }
 
 void rtp_print_error(srtp_err_status_t status, char *message)
